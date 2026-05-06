@@ -41,7 +41,15 @@ from audio_features import (
     build_summary_lines,
     compute_spectrum_snapshot,
     compute_spectrogram,
+    export_clip_features_to_csv,
+    export_cepstrum_snapshot_to_csv,
+    export_frame_cepstra_to_csv,
+    export_frame_spectra_to_csv,
     export_frames_to_csv,
+    export_segments_to_csv,
+    export_snapshot_spectrum_to_csv,
+    export_snapshot_time_domain_to_csv,
+    export_spectrogram_to_csv,
     export_summary_to_txt,
     load_wav_file,
 )
@@ -595,6 +603,8 @@ class MainWindow(QMainWindow):
         self.audio_data = None
         self.analysis_result = None
         self.spectrogram_data = None
+        self.fft_snapshot = None
+        self.cepstrum_snapshot = None
         self.analysis_thread = None
         self.player = QMediaPlayer(self)
         self.player.setNotifyInterval(50)
@@ -678,37 +688,41 @@ class MainWindow(QMainWindow):
         self.export_txt_button.clicked.connect(self.export_txt)
         controls_layout.addWidget(self.export_txt_button, 0, 3)
 
+        self.export_project2_csv_button = QPushButton("CSV P2")
+        self.export_project2_csv_button.clicked.connect(self.export_project2_csv_bundle)
+        controls_layout.addWidget(self.export_project2_csv_button, 0, 4)
+
         self.play_button = QPushButton("Play")
         self.play_button.clicked.connect(self.play_audio)
-        controls_layout.addWidget(self.play_button, 0, 4)
+        controls_layout.addWidget(self.play_button, 0, 5)
 
         self.pause_button = QPushButton("Pauza")
         self.pause_button.clicked.connect(self.pause_audio)
-        controls_layout.addWidget(self.pause_button, 0, 5)
+        controls_layout.addWidget(self.pause_button, 0, 6)
 
         self.stop_button = QPushButton("Stop")
         self.stop_button.clicked.connect(self.stop_audio)
-        controls_layout.addWidget(self.stop_button, 0, 6)
+        controls_layout.addWidget(self.stop_button, 0, 7)
 
-        controls_layout.addWidget(QLabel("Frame [ms]:"), 0, 7)
+        controls_layout.addWidget(QLabel("Frame [ms]:"), 0, 8)
         self.frame_input = QLineEdit("20")
         self.frame_input.setMaximumWidth(80)
-        controls_layout.addWidget(self.frame_input, 0, 8)
+        controls_layout.addWidget(self.frame_input, 0, 9)
 
-        controls_layout.addWidget(QLabel("Hop [ms]:"), 0, 9)
+        controls_layout.addWidget(QLabel("Hop [ms]:"), 0, 10)
         self.hop_input = QLineEdit("10")
         self.hop_input.setMaximumWidth(80)
-        controls_layout.addWidget(self.hop_input, 0, 10)
+        controls_layout.addWidget(self.hop_input, 0, 11)
 
         self.position_slider = QSlider(Qt.Horizontal)
         self.position_slider.setEnabled(False)
         self.position_slider.sliderPressed.connect(self.on_position_slider_pressed)
         self.position_slider.sliderReleased.connect(self.on_position_slider_released)
         self.position_slider.sliderMoved.connect(self.on_position_slider_moved)
-        controls_layout.addWidget(self.position_slider, 1, 0, 1, 10)
+        controls_layout.addWidget(self.position_slider, 1, 0, 1, 11)
 
         self.position_label = QLabel("00:00.0 / 00:00.0")
-        controls_layout.addWidget(self.position_label, 1, 10)
+        controls_layout.addWidget(self.position_label, 1, 11)
 
         controls_layout.addWidget(QLabel("Zoom:"), 2, 0)
         self.zoom_selector = QComboBox()
@@ -724,14 +738,14 @@ class MainWindow(QMainWindow):
         self.view_slider = QSlider(Qt.Horizontal)
         self.view_slider.setEnabled(False)
         self.view_slider.valueChanged.connect(self.on_view_slider_changed)
-        controls_layout.addWidget(self.view_slider, 2, 2, 1, 8)
+        controls_layout.addWidget(self.view_slider, 2, 2, 1, 9)
 
         self.view_label = QLabel("Widok: caly plik")
-        controls_layout.addWidget(self.view_label, 2, 10)
+        controls_layout.addWidget(self.view_label, 2, 11)
 
         self.info_label = QLabel("Wczytaj plik WAV, następnie wciśnij Analiza")
         self.info_label.setWordWrap(True)
-        controls_layout.addWidget(self.info_label, 3, 0, 1, 11)
+        controls_layout.addWidget(self.info_label, 3, 0, 1, 12)
 
         main_layout.addLayout(controls_layout)
 
@@ -1090,6 +1104,9 @@ class MainWindow(QMainWindow):
         return reduced_x, reduced_y
 
     def clear_project2_views(self) -> None:
+        self.fft_snapshot = None
+        self.cepstrum_snapshot = None
+        self.spectrogram_data = None
         self.fft_signal_plot.clear_plot()
         self.fft_windowed_signal_plot.clear_plot()
         self.fft_raw_spectrum_plot.clear_plot()
@@ -1192,6 +1209,7 @@ class MainWindow(QMainWindow):
         self.update_live_analysis_views(self.player.position(), force=True)
 
     def update_fft_tab(self) -> None:
+        self.fft_snapshot = None
         if self.audio_data is None:
             self.fft_signal_plot.clear_plot()
             self.fft_windowed_signal_plot.clear_plot()
@@ -1218,6 +1236,7 @@ class MainWindow(QMainWindow):
             duration_seconds=duration_seconds,
             window_name=self.fft_window_selector.currentText(),
         )
+        self.fft_snapshot = snapshot
 
         if use_full_signal:
             time_scale = 1.0
@@ -1279,6 +1298,7 @@ class MainWindow(QMainWindow):
 
     def update_spectrogram_tab(self) -> None:
         if self.audio_data is None:
+            self.spectrogram_data = None
             self.spectrogram_widget.clear_spectrogram()
             self.spectrogram_info_label.setText("Brak pliku WAV do analizy.")
             return
@@ -1323,6 +1343,7 @@ class MainWindow(QMainWindow):
         )
 
     def update_cepstrum_tab(self) -> None:
+        self.cepstrum_snapshot = None
         if self.audio_data is None:
             self.cepstrum_signal_plot.clear_plot()
             self.cepstrum_plot.clear_plot()
@@ -1364,6 +1385,7 @@ class MainWindow(QMainWindow):
             cepstrum_min_frequency=50.0,
             cepstrum_max_frequency=400.0,
         )
+        self.cepstrum_snapshot = snapshot
 
         if snapshot.duration_seconds <= 0.12:
             signal_times = snapshot.time_axis * 1000.0
@@ -1665,6 +1687,116 @@ class MainWindow(QMainWindow):
                     self.apply_label_color(item, frame.speech_music_label)
                 self.frames_table.setItem(row_index, column_index, item)
 
+    def build_export_basename(self) -> str:
+        if self.audio_data is None:
+            return "audio"
+
+        stem = os.path.splitext(os.path.basename(self.audio_data.path))[0]
+        safe_characters = []
+        for character in stem:
+            if character.isalnum() or character in ("-", "_"):
+                safe_characters.append(character)
+            else:
+                safe_characters.append("_")
+
+        safe_name = "".join(safe_characters).strip("_")
+        return safe_name or "audio"
+
+    def refresh_project2_export_data(self) -> bool:
+        self.update_fft_tab()
+        if self.fft_snapshot is None:
+            return False
+
+        self.update_cepstrum_tab()
+        if self.cepstrum_snapshot is None:
+            return False
+
+        self.spectrogram_data = None
+        self.update_spectrogram_tab()
+        if self.spectrogram_data is None:
+            return False
+
+        return True
+
+    def export_project2_csv_bundle(self) -> None:
+        if self.audio_data is None:
+            self.show_error("Brak pliku", "Najpierw wczytaj plik WAV.")
+            return
+        if self.analysis_result is None:
+            self.show_error("Brak analizy", "Najpierw uruchom Analiza, aby wyeksportowac pakiet P2.")
+            return
+
+        target_directory = QFileDialog.getExistingDirectory(self, "Wybierz folder pakietu CSV P2")
+        if not target_directory:
+            return
+
+        if not self.refresh_project2_export_data():
+            return
+
+        export_basename = self.build_export_basename()
+        bundle_directory = os.path.join(target_directory, f"{export_basename}_csv_p2")
+        os.makedirs(bundle_directory, exist_ok=True)
+
+        try:
+            export_frames_to_csv(
+                self.analysis_result,
+                os.path.join(bundle_directory, f"{export_basename}_frame_features.csv"),
+            )
+            export_clip_features_to_csv(
+                self.analysis_result,
+                os.path.join(bundle_directory, f"{export_basename}_clip_features.csv"),
+            )
+            export_segments_to_csv(
+                self.analysis_result.voicing_segments,
+                os.path.join(bundle_directory, f"{export_basename}_voicing_segments.csv"),
+                "voicing",
+            )
+            export_segments_to_csv(
+                self.analysis_result.speech_music_segments,
+                os.path.join(bundle_directory, f"{export_basename}_speech_music_segments.csv"),
+                "speech_music",
+            )
+            export_snapshot_time_domain_to_csv(
+                self.fft_snapshot,
+                os.path.join(bundle_directory, f"{export_basename}_fft_snapshot_time.csv"),
+                audio_path=self.audio_data.path,
+            )
+            export_snapshot_spectrum_to_csv(
+                self.fft_snapshot,
+                os.path.join(bundle_directory, f"{export_basename}_fft_snapshot_spectrum.csv"),
+                audio_path=self.audio_data.path,
+            )
+            export_cepstrum_snapshot_to_csv(
+                self.cepstrum_snapshot,
+                os.path.join(bundle_directory, f"{export_basename}_cepstrum_snapshot.csv"),
+                audio_path=self.audio_data.path,
+            )
+            export_frame_spectra_to_csv(
+                self.analysis_result,
+                os.path.join(bundle_directory, f"{export_basename}_frame_spectrum_long.csv"),
+                audio_path=self.audio_data.path,
+                window_name=self.fft_window_selector.currentText(),
+            )
+            export_frame_cepstra_to_csv(
+                self.analysis_result,
+                os.path.join(bundle_directory, f"{export_basename}_frame_cepstrum_long.csv"),
+                audio_path=self.audio_data.path,
+                window_name=self.cepstrum_window_selector.currentText(),
+                segment_duration_ms=self.cepstrum_snapshot.duration_seconds * 1000.0,
+                min_frequency_hz=50.0,
+                max_frequency_hz=400.0,
+            )
+            export_spectrogram_to_csv(
+                self.spectrogram_data,
+                os.path.join(bundle_directory, f"{export_basename}_spectrogram_long.csv"),
+                audio_path=self.audio_data.path,
+            )
+        except Exception as error:
+            self.show_error("Blad zapisu", str(error))
+            return
+
+        self.info_label.setText(f"Zapisano pakiet CSV P2: {bundle_directory}")
+
     def export_csv(self) -> None:
         if self.analysis_result is None:
             self.show_error("Brak analizy", "Najpierw wczytaj plik WAV")
@@ -1914,6 +2046,7 @@ class MainWindow(QMainWindow):
         self.analyze_button.setEnabled(enabled)
         self.export_csv_button.setEnabled(enabled)
         self.export_txt_button.setEnabled(enabled)
+        self.export_project2_csv_button.setEnabled(enabled)
         self.frame_input.setEnabled(enabled)
         self.hop_input.setEnabled(enabled)
         self.spectrogram_window_selector.setEnabled(enabled)

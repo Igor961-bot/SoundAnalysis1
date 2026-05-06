@@ -259,6 +259,22 @@ def downsample_signal(samples: np.ndarray, factor: int) -> np.ndarray:
     return np.concatenate(reduced_parts).astype(np.float64)
 
 
+def prepare_analysis_signal(
+    audio_data: AudioData,
+    max_sample_rate: int = 16000,
+) -> tuple[np.ndarray, int, int]:
+    analysis_sample_rate = audio_data.sample_rate
+    downsample_factor = 1
+    analysis_samples = audio_data.samples
+
+    if audio_data.sample_rate > max_sample_rate:
+        downsample_factor = math.ceil(audio_data.sample_rate / max_sample_rate)
+        analysis_sample_rate = int(round(audio_data.sample_rate / downsample_factor))
+        analysis_samples = downsample_signal(audio_data.samples, downsample_factor)
+
+    return analysis_samples.astype(np.float64), analysis_sample_rate, downsample_factor
+
+
 def sign_value(value: float) -> int:
     if value > 0:
         return 1
@@ -594,23 +610,14 @@ def calculate_real_cepstrum(
     return quefrencies, cepstrum
 
 
-def calculate_cepstrum_f0(
-    frame: np.ndarray,
-    sample_rate: int,
+def detect_cepstrum_f0_from_curve(
+    quefrencies: np.ndarray,
+    cepstrum: np.ndarray,
     min_frequency: float = 50.0,
     max_frequency: float = 400.0,
-    window_name: str = "hamming",
     reference_frequency: float | None = None,
 ) -> float:
-    if len(frame) == 0 or sample_rate <= 0:
-        return 0.0
-
-    energy = float(np.mean(frame * frame))
-    if energy <= 1e-12:
-        return 0.0
-
-    quefrencies, cepstrum = calculate_real_cepstrum(frame, sample_rate, window_name)
-    if len(cepstrum) == 0:
+    if len(quefrencies) == 0 or len(cepstrum) == 0 or len(quefrencies) != len(cepstrum):
         return 0.0
 
     min_quefrency = 1.0 / max_frequency
@@ -660,6 +667,34 @@ def calculate_cepstrum_f0(
         return 0.0
 
     return frequency
+
+
+def calculate_cepstrum_f0(
+    frame: np.ndarray,
+    sample_rate: int,
+    min_frequency: float = 50.0,
+    max_frequency: float = 400.0,
+    window_name: str = "hamming",
+    reference_frequency: float | None = None,
+) -> float:
+    if len(frame) == 0 or sample_rate <= 0:
+        return 0.0
+
+    energy = float(np.mean(frame * frame))
+    if energy <= 1e-12:
+        return 0.0
+
+    quefrencies, cepstrum = calculate_real_cepstrum(frame, sample_rate, window_name)
+    if len(cepstrum) == 0:
+        return 0.0
+
+    return detect_cepstrum_f0_from_curve(
+        quefrencies,
+        cepstrum,
+        min_frequency=min_frequency,
+        max_frequency=max_frequency,
+        reference_frequency=reference_frequency,
+    )
 
 
 def calculate_frequency_features(
@@ -1207,14 +1242,7 @@ def choose_overall_label(labels: list[str], clip_hzcrr: float = 0.0) -> str:
 
 
 def analyze_audio(audio_data: AudioData, frame_ms: float = 20.0, hop_ms: float = 10.0) -> AnalysisResult:
-    analysis_sample_rate = audio_data.sample_rate
-    downsample_factor = 1
-    analysis_samples = audio_data.samples
-
-    if audio_data.sample_rate > 16000:
-        downsample_factor = math.ceil(audio_data.sample_rate / 16000)
-        analysis_sample_rate = int(round(audio_data.sample_rate / downsample_factor))
-        analysis_samples = downsample_signal(audio_data.samples, downsample_factor)
+    analysis_samples, analysis_sample_rate, downsample_factor = prepare_analysis_signal(audio_data)
 
     frames, start_times, end_times, frame_size, hop_size = frame_signal(
         analysis_samples,
@@ -1723,6 +1751,543 @@ def export_frames_to_csv(result: AnalysisResult, path: str) -> None:
                     frame.speech_music_label,
                 ]
             )
+
+
+def get_analysis_frames_for_export(
+    result: AnalysisResult,
+) -> tuple[np.ndarray, int, list[np.ndarray], list[float], list[float]]:
+    analysis_samples, analysis_sample_rate, _downsample_factor = prepare_analysis_signal(result.audio_data)
+    frames, start_times, end_times, _frame_size, _hop_size = frame_signal(
+        analysis_samples,
+        analysis_sample_rate,
+        result.frame_ms,
+        result.hop_ms,
+    )
+    return analysis_samples, analysis_sample_rate, frames, start_times, end_times
+
+
+def export_clip_features_to_csv(result: AnalysisResult, path: str) -> None:
+    audio = result.audio_data
+    clip = result.clip
+
+    with open(path, "w", newline="", encoding="utf-8") as output_file:
+        writer = csv.writer(output_file)
+        writer.writerow(
+            [
+                "audio_path",
+                "sample_rate_hz",
+                "analysis_sample_rate_hz",
+                "downsample_factor",
+                "channels",
+                "duration_s",
+                "frame_ms",
+                "hop_ms",
+                "frame_count",
+                "mean_volume",
+                "vstd",
+                "vdr",
+                "vu",
+                "lster",
+                "energy_entropy",
+                "zstd",
+                "hzcrr",
+                "silent_ratio",
+                "mean_f0_autocorrelation_hz",
+                "mean_f0_amdf_hz",
+                "mean_f0_cepstrum_hz",
+                "mean_dominant_frequency_fft_hz",
+                "mean_spectral_centroid_hz",
+                "mean_effective_bandwidth_hz",
+                "mean_ersb1",
+                "mean_ersb2",
+                "mean_ersb3",
+                "mean_spectral_flatness",
+                "mean_spectral_crest",
+                "overall_label",
+            ]
+        )
+        writer.writerow(
+            [
+                audio.path,
+                audio.sample_rate,
+                result.analysis_sample_rate,
+                result.downsample_factor,
+                audio.channels,
+                f"{audio.duration_seconds:.6f}",
+                f"{result.frame_ms:.6f}",
+                f"{result.hop_ms:.6f}",
+                len(result.frames),
+                f"{clip.mean_volume:.6f}",
+                f"{clip.vstd:.6f}",
+                f"{clip.vdr:.6f}",
+                f"{clip.vu:.6f}",
+                f"{clip.lster:.6f}",
+                f"{clip.energy_entropy:.6f}",
+                f"{clip.zstd:.6f}",
+                f"{clip.hzcrr:.6f}",
+                f"{clip.silent_ratio:.6f}",
+                f"{clip.mean_f0_autocorrelation:.6f}",
+                f"{clip.mean_f0_amdf:.6f}",
+                f"{clip.mean_f0_cepstrum:.6f}",
+                f"{clip.mean_dominant_frequency_fft:.6f}",
+                f"{clip.mean_spectral_centroid:.6f}",
+                f"{clip.mean_effective_bandwidth:.6f}",
+                f"{clip.mean_ersb1:.6f}",
+                f"{clip.mean_ersb2:.6f}",
+                f"{clip.mean_ersb3:.6f}",
+                f"{clip.mean_spectral_flatness:.6f}",
+                f"{clip.mean_spectral_crest:.6f}",
+                clip.overall_label,
+            ]
+        )
+
+
+def export_segments_to_csv(
+    segments: list[tuple[float, float, str]],
+    path: str,
+    segment_type: str,
+) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as output_file:
+        writer = csv.writer(output_file)
+        writer.writerow(
+            [
+                "segment_type",
+                "start_time_s",
+                "end_time_s",
+                "duration_s",
+                "label",
+            ]
+        )
+
+        for start_time, end_time, label in segments:
+            writer.writerow(
+                [
+                    segment_type,
+                    f"{start_time:.6f}",
+                    f"{end_time:.6f}",
+                    f"{max(0.0, end_time - start_time):.6f}",
+                    label,
+                ]
+            )
+
+
+def export_snapshot_time_domain_to_csv(
+    snapshot: SpectrumSnapshot,
+    path: str,
+    audio_path: str = "",
+) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as output_file:
+        writer = csv.writer(output_file)
+        writer.writerow(
+            [
+                "audio_path",
+                "start_time_s",
+                "duration_s",
+                "sample_rate_hz",
+                "window_name",
+                "sample_index",
+                "time_local_s",
+                "raw_sample",
+                "windowed_sample",
+            ]
+        )
+
+        for index, (time_value, raw_value, windowed_value) in enumerate(
+            zip(snapshot.time_axis, snapshot.raw_samples, snapshot.windowed_samples)
+        ):
+            writer.writerow(
+                [
+                    audio_path,
+                    f"{snapshot.start_time:.6f}",
+                    f"{snapshot.duration_seconds:.6f}",
+                    snapshot.sample_rate,
+                    snapshot.window_name,
+                    index,
+                    f"{float(time_value):.9f}",
+                    f"{float(raw_value):.9f}",
+                    f"{float(windowed_value):.9f}",
+                ]
+            )
+
+
+def export_snapshot_spectrum_to_csv(
+    snapshot: SpectrumSnapshot,
+    path: str,
+    audio_path: str = "",
+) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as output_file:
+        writer = csv.writer(output_file)
+        writer.writerow(
+            [
+                "audio_path",
+                "start_time_s",
+                "duration_s",
+                "sample_rate_hz",
+                "window_name",
+                "frequency_hz",
+                "raw_magnitude_db_rel",
+                "windowed_magnitude_db_rel",
+                "spectral_centroid_hz",
+                "effective_bandwidth_hz",
+                "spectral_flatness",
+                "spectral_crest",
+                "band_energy_1",
+                "band_energy_2",
+                "band_energy_3",
+                "band_energy_4",
+                "band_ratio_1",
+                "band_ratio_2",
+                "band_ratio_3",
+                "band_ratio_4",
+                "f0_cepstrum_hz",
+            ]
+        )
+
+        for index, frequency in enumerate(snapshot.frequencies):
+            writer.writerow(
+                [
+                    audio_path,
+                    f"{snapshot.start_time:.6f}",
+                    f"{snapshot.duration_seconds:.6f}",
+                    snapshot.sample_rate,
+                    snapshot.window_name,
+                    f"{float(frequency):.6f}",
+                    f"{float(snapshot.raw_magnitude_db[index]):.6f}",
+                    f"{float(snapshot.windowed_magnitude_db[index]):.6f}",
+                    f"{snapshot.spectral_centroid:.6f}",
+                    f"{snapshot.effective_bandwidth:.6f}",
+                    f"{snapshot.spectral_flatness:.6f}",
+                    f"{snapshot.spectral_crest:.6f}",
+                    f"{snapshot.band_energies[0]:.6f}",
+                    f"{snapshot.band_energies[1]:.6f}",
+                    f"{snapshot.band_energies[2]:.6f}",
+                    f"{snapshot.band_energies[3]:.6f}",
+                    f"{snapshot.band_ratios[0]:.6f}",
+                    f"{snapshot.band_ratios[1]:.6f}",
+                    f"{snapshot.band_ratios[2]:.6f}",
+                    f"{snapshot.band_ratios[3]:.6f}",
+                    f"{snapshot.f0_cepstrum:.6f}",
+                ]
+            )
+
+
+def export_frame_spectra_to_csv(
+    result: AnalysisResult,
+    path: str,
+    audio_path: str = "",
+    window_name: str = "hamming",
+) -> None:
+    _analysis_samples, analysis_sample_rate, frames, start_times, end_times = get_analysis_frames_for_export(result)
+    normalized_window_name = normalize_window_name(window_name)
+    frame_count = min(len(result.frames), len(frames), len(start_times), len(end_times))
+
+    with open(path, "w", newline="", encoding="utf-8") as output_file:
+        writer = csv.writer(output_file)
+        writer.writerow(
+            [
+                "audio_path",
+                "original_sample_rate_hz",
+                "analysis_sample_rate_hz",
+                "frame_ms",
+                "hop_ms",
+                "fft_window_name",
+                "frame_index",
+                "frame_start_s",
+                "frame_end_s",
+                "frame_center_s",
+                "frame_duration_s",
+                "silent_flag",
+                "voicing_label",
+                "speech_music_label",
+                "analysis_f0_autocorrelation_hz",
+                "analysis_f0_amdf_hz",
+                "analysis_f0_cepstrum_hz",
+                "analysis_dominant_frequency_fft_hz",
+                "analysis_spectral_centroid_hz",
+                "analysis_effective_bandwidth_hz",
+                "analysis_ersb1",
+                "analysis_ersb2",
+                "analysis_ersb3",
+                "analysis_spectral_flatness",
+                "analysis_spectral_crest",
+                "frequency_bin_index",
+                "frequency_hz",
+                "raw_magnitude_linear",
+                "raw_power_linear",
+                "raw_magnitude_db_rel",
+                "windowed_magnitude_linear",
+                "windowed_power_linear",
+                "windowed_magnitude_db_rel",
+            ]
+        )
+
+        for index in range(frame_count):
+            frame_features = result.frames[index]
+            frame = frames[index]
+            frame_start = start_times[index]
+            frame_end = end_times[index]
+            frame_center = (frame_start + frame_end) * 0.5
+            _raw_windowed, frequencies, raw_magnitudes, raw_power = calculate_fft_spectrum(
+                frame,
+                analysis_sample_rate,
+                "rectangular",
+            )
+            _windowed, _windowed_frequencies, windowed_magnitudes, windowed_power = calculate_fft_spectrum(
+                frame,
+                analysis_sample_rate,
+                normalized_window_name,
+            )
+            raw_magnitude_db = build_relative_db(raw_magnitudes)
+            windowed_magnitude_db = build_relative_db(windowed_magnitudes)
+
+            for bin_index, frequency in enumerate(frequencies):
+                writer.writerow(
+                    [
+                        audio_path,
+                        result.audio_data.sample_rate,
+                        analysis_sample_rate,
+                        f"{result.frame_ms:.6f}",
+                        f"{result.hop_ms:.6f}",
+                        normalized_window_name,
+                        frame_features.index,
+                        f"{frame_start:.6f}",
+                        f"{frame_end:.6f}",
+                        f"{frame_center:.6f}",
+                        f"{max(0.0, frame_end - frame_start):.6f}",
+                        frame_features.silent_flag,
+                        frame_features.voicing_label,
+                        frame_features.speech_music_label,
+                        f"{frame_features.f0_autocorrelation:.6f}",
+                        f"{frame_features.f0_amdf:.6f}",
+                        f"{frame_features.f0_cepstrum:.6f}",
+                        f"{frame_features.dominant_frequency_fft:.6f}",
+                        f"{frame_features.spectral_centroid:.6f}",
+                        f"{frame_features.effective_bandwidth:.6f}",
+                        f"{frame_features.ersb1:.6f}",
+                        f"{frame_features.ersb2:.6f}",
+                        f"{frame_features.ersb3:.6f}",
+                        f"{frame_features.spectral_flatness:.6f}",
+                        f"{frame_features.spectral_crest:.6f}",
+                        bin_index,
+                        f"{float(frequency):.6f}",
+                        f"{float(raw_magnitudes[bin_index]):.9f}",
+                        f"{float(raw_power[bin_index]):.9f}",
+                        f"{float(raw_magnitude_db[bin_index]):.6f}",
+                        f"{float(windowed_magnitudes[bin_index]):.9f}",
+                        f"{float(windowed_power[bin_index]):.9f}",
+                        f"{float(windowed_magnitude_db[bin_index]):.6f}",
+                    ]
+                )
+
+
+def export_cepstrum_snapshot_to_csv(
+    snapshot: SpectrumSnapshot,
+    path: str,
+    audio_path: str = "",
+    min_frequency_hz: float = 50.0,
+    max_frequency_hz: float = 400.0,
+) -> None:
+    min_quefrency_ms = (1.0 / max_frequency_hz) * 1000.0
+    max_quefrency_ms = (1.0 / min_frequency_hz) * 1000.0
+
+    with open(path, "w", newline="", encoding="utf-8") as output_file:
+        writer = csv.writer(output_file)
+        writer.writerow(
+            [
+                "audio_path",
+                "start_time_s",
+                "duration_s",
+                "sample_rate_hz",
+                "window_name",
+                "quefrency_ms",
+                "cepstrum_value",
+                "in_f0_search_range",
+                "detected_f0_cepstrum_hz",
+            ]
+        )
+
+        for quefrency_ms, cepstrum_value in zip(snapshot.cepstrum_quefrencies_ms, snapshot.cepstrum_values):
+            in_search_range = min_quefrency_ms <= float(quefrency_ms) <= max_quefrency_ms
+            writer.writerow(
+                [
+                    audio_path,
+                    f"{snapshot.start_time:.6f}",
+                    f"{snapshot.duration_seconds:.6f}",
+                    snapshot.sample_rate,
+                    snapshot.window_name,
+                    f"{float(quefrency_ms):.6f}",
+                    f"{float(cepstrum_value):.9f}",
+                    int(in_search_range),
+                    f"{snapshot.f0_cepstrum:.6f}",
+                ]
+            )
+
+
+def export_frame_cepstra_to_csv(
+    result: AnalysisResult,
+    path: str,
+    audio_path: str = "",
+    window_name: str = "hamming",
+    segment_duration_ms: float | None = None,
+    min_frequency_hz: float = 50.0,
+    max_frequency_hz: float = 400.0,
+) -> None:
+    analysis_samples, analysis_sample_rate, frames, start_times, end_times = get_analysis_frames_for_export(result)
+    normalized_window_name = normalize_window_name(window_name)
+    frame_count = min(len(result.frames), len(frames), len(start_times), len(end_times))
+    effective_duration_ms = segment_duration_ms if segment_duration_ms is not None else max(40.0, result.frame_ms)
+    effective_duration_seconds = max(0.005, effective_duration_ms / 1000.0)
+    min_quefrency_ms = (1.0 / max_frequency_hz) * 1000.0
+    max_quefrency_ms = (1.0 / min_frequency_hz) * 1000.0
+
+    with open(path, "w", newline="", encoding="utf-8") as output_file:
+        writer = csv.writer(output_file)
+        writer.writerow(
+            [
+                "audio_path",
+                "original_sample_rate_hz",
+                "analysis_sample_rate_hz",
+                "cepstrum_window_name",
+                "cepstrum_segment_duration_ms",
+                "cepstrum_min_frequency_hz",
+                "cepstrum_max_frequency_hz",
+                "frame_index",
+                "frame_start_s",
+                "frame_end_s",
+                "frame_center_s",
+                "segment_start_s",
+                "segment_end_s",
+                "segment_duration_s",
+                "silent_flag",
+                "voicing_label",
+                "speech_music_label",
+                "analysis_f0_autocorrelation_hz",
+                "analysis_f0_amdf_hz",
+                "analysis_f0_cepstrum_hz",
+                "raw_detected_f0_cepstrum_hz",
+                "quefrency_bin_index",
+                "quefrency_ms",
+                "equivalent_frequency_hz",
+                "cepstrum_value",
+                "in_f0_search_range",
+            ]
+        )
+
+        for index in range(frame_count):
+            frame_features = result.frames[index]
+            frame_start = start_times[index]
+            frame_end = end_times[index]
+            frame_center = (frame_start + frame_end) * 0.5
+            segment = extract_centered_audio_segment(
+                analysis_samples,
+                analysis_sample_rate,
+                frame_center,
+                effective_duration_seconds,
+            )
+
+            reference_candidates = []
+            if 70.0 <= frame_features.f0_autocorrelation <= 350.0:
+                reference_candidates.append(frame_features.f0_autocorrelation)
+            if 70.0 <= frame_features.f0_amdf <= 350.0:
+                reference_candidates.append(frame_features.f0_amdf)
+            reference_frequency = mean_value(reference_candidates) if reference_candidates else None
+
+            quefrencies, cepstrum = calculate_real_cepstrum(
+                segment,
+                analysis_sample_rate,
+                normalized_window_name,
+            )
+            raw_detected_f0 = detect_cepstrum_f0_from_curve(
+                quefrencies,
+                cepstrum,
+                min_frequency=min_frequency_hz,
+                max_frequency=max_frequency_hz,
+                reference_frequency=reference_frequency,
+            )
+
+            if len(quefrencies) == 0 or len(cepstrum) == 0:
+                continue
+
+            half_length = (len(quefrencies) // 2) + 1
+            quefrencies = quefrencies[:half_length]
+            cepstrum = cepstrum[:half_length]
+
+            segment_start = frame_center - (effective_duration_seconds * 0.5)
+            segment_end = segment_start + effective_duration_seconds
+
+            for bin_index, quefrency in enumerate(quefrencies):
+                quefrency_ms = float(quefrency * 1000.0)
+                equivalent_frequency = 0.0
+                if quefrency > 1e-12:
+                    equivalent_frequency = 1.0 / float(quefrency)
+                in_search_range = min_quefrency_ms <= quefrency_ms <= max_quefrency_ms
+
+                writer.writerow(
+                    [
+                        audio_path,
+                        result.audio_data.sample_rate,
+                        analysis_sample_rate,
+                        normalized_window_name,
+                        f"{effective_duration_ms:.6f}",
+                        f"{min_frequency_hz:.6f}",
+                        f"{max_frequency_hz:.6f}",
+                        frame_features.index,
+                        f"{frame_start:.6f}",
+                        f"{frame_end:.6f}",
+                        f"{frame_center:.6f}",
+                        f"{segment_start:.6f}",
+                        f"{segment_end:.6f}",
+                        f"{effective_duration_seconds:.6f}",
+                        frame_features.silent_flag,
+                        frame_features.voicing_label,
+                        frame_features.speech_music_label,
+                        f"{frame_features.f0_autocorrelation:.6f}",
+                        f"{frame_features.f0_amdf:.6f}",
+                        f"{frame_features.f0_cepstrum:.6f}",
+                        f"{raw_detected_f0:.6f}",
+                        bin_index,
+                        f"{quefrency_ms:.6f}",
+                        f"{equivalent_frequency:.6f}",
+                        f"{float(cepstrum[bin_index]):.9f}",
+                        int(in_search_range),
+                    ]
+                )
+
+
+def export_spectrogram_to_csv(
+    spectrogram: SpectrogramData,
+    path: str,
+    audio_path: str = "",
+) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as output_file:
+        writer = csv.writer(output_file)
+        writer.writerow(
+            [
+                "audio_path",
+                "window_name",
+                "frame_ms",
+                "overlap_percent",
+                "sample_rate_hz",
+                "time_s",
+                "frequency_hz",
+                "magnitude_db_rel",
+            ]
+        )
+
+        for frequency_index, frequency in enumerate(spectrogram.frequencies):
+            for time_index, time_value in enumerate(spectrogram.times):
+                writer.writerow(
+                    [
+                        audio_path,
+                        spectrogram.window_name,
+                        f"{spectrogram.frame_ms:.6f}",
+                        f"{spectrogram.overlap_percent:.6f}",
+                        spectrogram.sample_rate,
+                        f"{float(time_value):.6f}",
+                        f"{float(frequency):.6f}",
+                        f"{float(spectrogram.magnitude_db[frequency_index, time_index]):.6f}",
+                    ]
+                )
 
 
 def export_summary_to_txt(result: AnalysisResult, path: str) -> None:
