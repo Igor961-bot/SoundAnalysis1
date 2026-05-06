@@ -13,6 +13,22 @@ if os.path.isdir(VENDOR_DIR) and VENDOR_DIR not in sys.path:
 import numpy as np
 
 
+WINDOW_NAME_MAP = {
+    "prostokatne": "rectangular",
+    "rectangular": "rectangular",
+    "rectangle": "rectangular",
+    "triangular": "triangular",
+    "trojkatne": "triangular",
+    "bartlett": "triangular",
+    "hamming": "hamming",
+    "hann": "hann",
+    "hanning": "hann",
+    "van hann": "hann",
+    "van hanna": "hann",
+    "blackman": "blackman",
+}
+
+
 @dataclass
 class AudioData:
     path: str
@@ -37,6 +53,14 @@ class FrameFeatures:
     f0_autocorrelation: float
     f0_amdf: float
     dominant_frequency_fft: float
+    spectral_centroid: float
+    effective_bandwidth: float
+    ersb1: float
+    ersb2: float
+    ersb3: float
+    spectral_flatness: float
+    spectral_crest: float
+    f0_cepstrum: float
     voicing_label: str
     speech_music_label: str
 
@@ -55,7 +79,49 @@ class ClipFeatures:
     mean_f0_autocorrelation: float
     mean_f0_amdf: float
     mean_dominant_frequency_fft: float
+    mean_spectral_centroid: float
+    mean_effective_bandwidth: float
+    mean_ersb1: float
+    mean_ersb2: float
+    mean_ersb3: float
+    mean_spectral_flatness: float
+    mean_spectral_crest: float
+    mean_f0_cepstrum: float
     overall_label: str
+
+
+@dataclass
+class SpectrumSnapshot:
+    start_time: float
+    duration_seconds: float
+    sample_rate: int
+    window_name: str
+    time_axis: np.ndarray
+    raw_samples: np.ndarray
+    windowed_samples: np.ndarray
+    frequencies: np.ndarray
+    raw_magnitude_db: np.ndarray
+    windowed_magnitude_db: np.ndarray
+    spectral_centroid: float
+    effective_bandwidth: float
+    band_energies: tuple[float, float, float, float]
+    band_ratios: tuple[float, float, float, float]
+    spectral_flatness: float
+    spectral_crest: float
+    cepstrum_quefrencies_ms: np.ndarray
+    cepstrum_values: np.ndarray
+    f0_cepstrum: float
+
+
+@dataclass
+class SpectrogramData:
+    frame_ms: float
+    overlap_percent: float
+    sample_rate: int
+    window_name: str
+    times: np.ndarray
+    frequencies: np.ndarray
+    magnitude_db: np.ndarray
 
 
 @dataclass
@@ -136,7 +202,12 @@ def decode_pcm_samples(raw_bytes: bytes, sample_width: int) -> np.ndarray:
     raise ValueError(f"Nieobslugiwana szerokosc probki WAV: {sample_width} bajty.")
 
 
-def frame_signal(samples: np.ndarray, sample_rate: int, frame_ms: float, hop_ms: float) -> tuple[list[np.ndarray], list[float], list[float], int, int]:
+def frame_signal(
+    samples: np.ndarray,
+    sample_rate: int,
+    frame_ms: float,
+    hop_ms: float,
+) -> tuple[list[np.ndarray], list[float], list[float], int, int]:
     frame_size = max(1, int(sample_rate * frame_ms / 1000.0))
     hop_size = max(1, int(sample_rate * hop_ms / 1000.0))
 
@@ -220,6 +291,32 @@ def std_dev(values: list[float]) -> float:
     return math.sqrt(variance)
 
 
+def normalize_window_name(name: str | None) -> str:
+    if not name:
+        return "rectangular"
+
+    normalized = name.strip().lower()
+    return WINDOW_NAME_MAP.get(normalized, normalized)
+
+
+def create_window(name: str | None, size: int) -> np.ndarray:
+    if size <= 0:
+        return np.zeros(0, dtype=np.float64)
+
+    normalized = normalize_window_name(name)
+    if normalized == "rectangular":
+        return np.ones(size, dtype=np.float64)
+    if normalized == "triangular":
+        return np.bartlett(size).astype(np.float64)
+    if normalized == "hamming":
+        return np.hamming(size).astype(np.float64)
+    if normalized == "hann":
+        return np.hanning(size).astype(np.float64)
+    if normalized == "blackman":
+        return np.blackman(size).astype(np.float64)
+    return np.ones(size, dtype=np.float64)
+
+
 def calculate_volume(frame: np.ndarray) -> float:
     if len(frame) == 0:
         return 0.0
@@ -259,7 +356,12 @@ def calculate_zcr(frame: np.ndarray) -> float:
     return zero_crossings / (2.0 * len(frame))
 
 
-def calculate_autocorrelation_f0(frame: np.ndarray, sample_rate: int, min_frequency: float = 50.0, max_frequency: float = 500.0) -> float:
+def calculate_autocorrelation_f0(
+    frame: np.ndarray,
+    sample_rate: int,
+    min_frequency: float = 50.0,
+    max_frequency: float = 500.0,
+) -> float:
     if len(frame) < 2 or sample_rate <= 0:
         return 0.0
 
@@ -289,7 +391,12 @@ def calculate_autocorrelation_f0(frame: np.ndarray, sample_rate: int, min_freque
     return sample_rate / best_lag
 
 
-def calculate_amdf_f0(frame: np.ndarray, sample_rate: int, min_frequency: float = 50.0, max_frequency: float = 500.0) -> float:
+def calculate_amdf_f0(
+    frame: np.ndarray,
+    sample_rate: int,
+    min_frequency: float = 50.0,
+    max_frequency: float = 500.0,
+) -> float:
     if len(frame) < 2 or sample_rate <= 0:
         return 0.0
 
@@ -342,32 +449,511 @@ def calculate_amdf_f0(frame: np.ndarray, sample_rate: int, min_frequency: float 
     return sample_rate / best_lag
 
 
-def create_hamming_window(size: int) -> np.ndarray:
-    if size <= 1:
-        return np.ones(size, dtype=np.float64)
+def calculate_fft_spectrum(
+    signal: np.ndarray,
+    sample_rate: int,
+    window_name: str | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if len(signal) == 0 or sample_rate <= 0:
+        return (
+            np.zeros(0, dtype=np.float64),
+            np.zeros(0, dtype=np.float64),
+            np.zeros(0, dtype=np.float64),
+            np.zeros(0, dtype=np.float64),
+        )
 
-    values = np.zeros(size, dtype=np.float64)
-    for index in range(size):
-        values[index] = 0.54 - 0.46 * math.cos((2.0 * math.pi * index) / (size - 1))
-    return values
-
-
-def calculate_dominant_frequency_fft(frame: np.ndarray, sample_rate: int) -> float:
-    if len(frame) < 2 or sample_rate <= 0:
-        return 0.0
-
-    window = create_hamming_window(len(frame))
-    windowed_frame = frame * window
-    spectrum = np.fft.rfft(windowed_frame)
+    samples = signal.astype(np.float64)
+    window = create_window(window_name, len(samples))
+    windowed = samples * window
+    spectrum = np.fft.rfft(windowed)
     magnitudes = np.abs(spectrum)
+    power = magnitudes * magnitudes
+    frequencies = np.fft.rfftfreq(len(samples), d=1.0 / sample_rate)
+    return windowed, frequencies, magnitudes, power
 
-    if len(magnitudes) <= 1:
+
+def calculate_dominant_frequency_from_spectrum(frequencies: np.ndarray, magnitudes: np.ndarray) -> float:
+    if len(magnitudes) <= 1 or len(frequencies) != len(magnitudes):
         return 0.0
 
-    magnitudes[0] = 0.0
-    best_index = int(np.argmax(magnitudes))
-    frequencies = np.fft.rfftfreq(len(frame), d=1.0 / sample_rate)
+    magnitudes_copy = magnitudes.copy()
+    magnitudes_copy[0] = 0.0
+    best_index = int(np.argmax(magnitudes_copy))
     return float(frequencies[best_index])
+
+
+def calculate_dominant_frequency_fft(frame: np.ndarray, sample_rate: int, window_name: str = "hamming") -> float:
+    _windowed, frequencies, magnitudes, _power = calculate_fft_spectrum(frame, sample_rate, window_name)
+    return calculate_dominant_frequency_from_spectrum(frequencies, magnitudes)
+
+
+def calculate_spectral_centroid(frequencies: np.ndarray, power: np.ndarray) -> float:
+    if len(frequencies) == 0 or len(frequencies) != len(power):
+        return 0.0
+
+    total_power = float(np.sum(power))
+    if total_power <= 1e-12:
+        return 0.0
+
+    return float(np.sum(frequencies * power) / total_power)
+
+
+def calculate_effective_bandwidth(frequencies: np.ndarray, power: np.ndarray, centroid: float) -> float:
+    if len(frequencies) == 0 or len(frequencies) != len(power):
+        return 0.0
+
+    total_power = float(np.sum(power))
+    if total_power <= 1e-12:
+        return 0.0
+
+    deviations = (frequencies - centroid) ** 2
+    return float(math.sqrt(float(np.sum(deviations * power) / total_power)))
+
+
+def calculate_band_energy_ratios(
+    frequencies: np.ndarray,
+    power: np.ndarray,
+    sample_rate: int,
+) -> tuple[tuple[float, float, float, float], tuple[float, float, float, float]]:
+    if len(frequencies) == 0 or len(frequencies) != len(power) or sample_rate <= 0:
+        zeros = (0.0, 0.0, 0.0, 0.0)
+        return zeros, zeros
+
+    nyquist = sample_rate / 2.0
+    band_limits = [0.0, 630.0, 1720.0, 4400.0, min(11025.0, nyquist)]
+    band_energies = []
+
+    for band_index in range(4):
+        low = band_limits[band_index]
+        high = band_limits[band_index + 1]
+        if high <= low:
+            band_energies.append(0.0)
+            continue
+
+        if band_index == 3:
+            mask = (frequencies >= low) & (frequencies <= high)
+        else:
+            mask = (frequencies >= low) & (frequencies < high)
+        band_energies.append(float(np.sum(power[mask])))
+
+    total_energy = float(np.sum(power))
+    if total_energy <= 1e-12:
+        band_ratios = (0.0, 0.0, 0.0, 0.0)
+    else:
+        band_ratios = tuple(energy / total_energy for energy in band_energies)
+
+    return tuple(band_energies), band_ratios
+
+
+def calculate_spectral_flatness(power: np.ndarray) -> float:
+    if len(power) == 0:
+        return 1.0
+
+    arithmetic_mean = float(np.mean(power))
+    if arithmetic_mean <= 1e-12:
+        return 1.0
+
+    positive_power = np.maximum(power, 1e-12)
+    geometric_mean = float(np.exp(np.mean(np.log(positive_power))))
+    return geometric_mean / arithmetic_mean
+
+
+def calculate_spectral_crest(power: np.ndarray) -> float:
+    if len(power) == 0:
+        return 0.0
+
+    arithmetic_mean = float(np.mean(power))
+    if arithmetic_mean <= 1e-12:
+        return 0.0
+
+    return float(np.max(power) / arithmetic_mean)
+
+
+def calculate_real_cepstrum(
+    frame: np.ndarray,
+    sample_rate: int,
+    window_name: str = "hamming",
+) -> tuple[np.ndarray, np.ndarray]:
+    if len(frame) == 0 or sample_rate <= 0:
+        return np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.float64)
+
+    centered_frame = frame.astype(np.float64) - float(np.mean(frame))
+    if float(np.mean(centered_frame * centered_frame)) <= 1e-12:
+        return np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.float64)
+
+    window = create_window(window_name, len(centered_frame))
+    windowed_frame = centered_frame * window
+    spectrum = np.fft.fft(windowed_frame)
+    magnitudes = np.abs(spectrum)
+    if len(magnitudes) == 0:
+        return np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.float64)
+
+    log_magnitude = np.log(np.maximum(magnitudes, 1e-12))
+    cepstrum = np.abs(np.fft.ifft(log_magnitude).real)
+    quefrencies = np.arange(len(cepstrum), dtype=np.float64) / sample_rate
+    return quefrencies, cepstrum
+
+
+def calculate_cepstrum_f0(
+    frame: np.ndarray,
+    sample_rate: int,
+    min_frequency: float = 50.0,
+    max_frequency: float = 400.0,
+    window_name: str = "hamming",
+    reference_frequency: float | None = None,
+) -> float:
+    if len(frame) == 0 or sample_rate <= 0:
+        return 0.0
+
+    energy = float(np.mean(frame * frame))
+    if energy <= 1e-12:
+        return 0.0
+
+    quefrencies, cepstrum = calculate_real_cepstrum(frame, sample_rate, window_name)
+    if len(cepstrum) == 0:
+        return 0.0
+
+    min_quefrency = 1.0 / max_frequency
+    max_quefrency = 1.0 / min_frequency
+    mask = (quefrencies >= min_quefrency) & (quefrencies <= max_quefrency)
+
+    if not np.any(mask):
+        return 0.0
+
+    search_values = cepstrum[mask]
+    search_quefrencies = quefrencies[mask]
+    if len(search_values) < 3:
+        return 0.0
+
+    candidate_peaks = []
+    for index in range(1, len(search_values) - 1):
+        current_value = float(search_values[index])
+        previous_value = float(search_values[index - 1])
+        next_value = float(search_values[index + 1])
+        if current_value > previous_value and current_value >= next_value:
+            prominence = current_value - max(previous_value, next_value)
+            frequency = 1.0 / float(search_quefrencies[index])
+            candidate_peaks.append((frequency, current_value, prominence))
+
+    if not candidate_peaks:
+        return 0.0
+
+    average_value = float(np.mean(search_values))
+    std_value = float(np.std(search_values))
+
+    if reference_frequency is not None and min_frequency <= reference_frequency <= max_frequency:
+        nearby_candidates = []
+        for frequency, current_value, prominence in candidate_peaks:
+            relative_distance = abs(frequency - reference_frequency) / max(reference_frequency, 1e-6)
+            if relative_distance <= 0.35:
+                nearby_candidates.append((frequency, current_value, prominence))
+
+        if nearby_candidates:
+            nearby_candidates.sort(key=lambda item: (item[2], item[1]), reverse=True)
+            frequency, current_value, _prominence = nearby_candidates[0]
+            if current_value >= average_value + (0.20 * std_value):
+                return frequency
+
+    candidate_peaks.sort(key=lambda item: (item[2], item[1]), reverse=True)
+    frequency, current_value, _prominence = candidate_peaks[0]
+    if current_value < average_value + (0.50 * std_value):
+        return 0.0
+
+    return frequency
+
+
+def calculate_frequency_features(
+    frame: np.ndarray,
+    sample_rate: int,
+    cepstrum_reference_frequency: float | None = None,
+    cepstrum_min_frequency: float = 50.0,
+    cepstrum_max_frequency: float = 400.0,
+) -> dict[str, float]:
+    _windowed, frequencies, magnitudes, power = calculate_fft_spectrum(frame, sample_rate, "hamming")
+    centroid = calculate_spectral_centroid(frequencies, power)
+    bandwidth = calculate_effective_bandwidth(frequencies, power, centroid)
+    _band_energies, band_ratios = calculate_band_energy_ratios(frequencies, power, sample_rate)
+
+    return {
+        "dominant_frequency_fft": calculate_dominant_frequency_from_spectrum(frequencies, magnitudes),
+        "spectral_centroid": centroid,
+        "effective_bandwidth": bandwidth,
+        "ersb1": band_ratios[0],
+        "ersb2": band_ratios[1],
+        "ersb3": band_ratios[2],
+        "spectral_flatness": calculate_spectral_flatness(power),
+        "spectral_crest": calculate_spectral_crest(power),
+        "f0_cepstrum": calculate_cepstrum_f0(
+            frame,
+            sample_rate,
+            min_frequency=cepstrum_min_frequency,
+            max_frequency=cepstrum_max_frequency,
+            reference_frequency=cepstrum_reference_frequency,
+        ),
+    }
+
+
+def extract_audio_segment(
+    samples: np.ndarray,
+    sample_rate: int,
+    start_time: float = 0.0,
+    duration_seconds: float | None = None,
+    pad_to_duration: bool = False,
+) -> np.ndarray:
+    if len(samples) == 0 or sample_rate <= 0:
+        return np.zeros(0, dtype=np.float64)
+
+    if duration_seconds is None:
+        return samples.astype(np.float64)
+
+    safe_start_time = max(0.0, start_time)
+    safe_duration = max(1.0 / sample_rate, duration_seconds)
+
+    start_index = int(round(safe_start_time * sample_rate))
+    frame_length = max(1, int(round(safe_duration * sample_rate)))
+    start_index = min(start_index, len(samples) - 1)
+
+    end_index = min(len(samples), start_index + frame_length)
+    segment = samples[start_index:end_index].astype(np.float64)
+
+    if pad_to_duration and len(segment) < frame_length:
+        segment = np.pad(segment, (0, frame_length - len(segment)))
+
+    return segment
+
+
+def extract_centered_audio_segment(
+    samples: np.ndarray,
+    sample_rate: int,
+    center_time: float,
+    duration_seconds: float,
+) -> np.ndarray:
+    if len(samples) == 0 or sample_rate <= 0:
+        return np.zeros(0, dtype=np.float64)
+
+    segment_length = max(1, int(round(duration_seconds * sample_rate)))
+    center_index = int(round(center_time * sample_rate))
+    start_index = center_index - (segment_length // 2)
+    end_index = start_index + segment_length
+
+    left_pad = max(0, -start_index)
+    right_pad = max(0, end_index - len(samples))
+    clamped_start = max(0, start_index)
+    clamped_end = min(len(samples), end_index)
+
+    segment = samples[clamped_start:clamped_end].astype(np.float64)
+    if left_pad > 0 or right_pad > 0:
+        segment = np.pad(segment, (left_pad, right_pad))
+
+    if len(segment) < segment_length:
+        segment = np.pad(segment, (0, segment_length - len(segment)))
+
+    return segment
+
+
+def build_relative_db(values: np.ndarray) -> np.ndarray:
+    if len(values) == 0:
+        return np.zeros(0, dtype=np.float64)
+
+    safe_values = np.maximum(values.astype(np.float64), 1e-12)
+    max_value = float(np.max(safe_values))
+    if max_value <= 1e-12:
+        return np.zeros(len(values), dtype=np.float64)
+
+    return 20.0 * np.log10(safe_values / max_value)
+
+
+def compute_spectrum_snapshot(
+    audio_data: AudioData,
+    start_time: float = 0.0,
+    duration_seconds: float | None = None,
+    window_name: str = "hamming",
+    cepstrum_reference_frequency: float | None = None,
+    cepstrum_min_frequency: float = 50.0,
+    cepstrum_max_frequency: float = 400.0,
+) -> SpectrumSnapshot:
+    if duration_seconds is None:
+        segment = audio_data.samples.astype(np.float64)
+        actual_start = 0.0
+        actual_duration = audio_data.duration_seconds
+    else:
+        segment = extract_audio_segment(
+            audio_data.samples,
+            audio_data.sample_rate,
+            start_time=start_time,
+            duration_seconds=duration_seconds,
+            pad_to_duration=True,
+        )
+        actual_start = max(0.0, start_time)
+        actual_duration = max(duration_seconds, 1.0 / max(1, audio_data.sample_rate))
+
+    if len(segment) == 0:
+        segment = np.zeros(1, dtype=np.float64)
+
+    time_axis = np.arange(len(segment), dtype=np.float64) / max(1, audio_data.sample_rate)
+    raw_windowed, raw_frequencies, raw_magnitudes, raw_power = calculate_fft_spectrum(
+        segment,
+        audio_data.sample_rate,
+        "rectangular",
+    )
+    windowed_samples, windowed_frequencies, windowed_magnitudes, windowed_power = calculate_fft_spectrum(
+        segment,
+        audio_data.sample_rate,
+        window_name,
+    )
+
+    centroid = calculate_spectral_centroid(windowed_frequencies, windowed_power)
+    bandwidth = calculate_effective_bandwidth(windowed_frequencies, windowed_power, centroid)
+    band_energies, band_ratios = calculate_band_energy_ratios(
+        windowed_frequencies,
+        windowed_power,
+        audio_data.sample_rate,
+    )
+    quefrencies, cepstrum = calculate_real_cepstrum(segment, audio_data.sample_rate, window_name)
+
+    return SpectrumSnapshot(
+        start_time=actual_start,
+        duration_seconds=actual_duration,
+        sample_rate=audio_data.sample_rate,
+        window_name=normalize_window_name(window_name),
+        time_axis=time_axis,
+        raw_samples=segment,
+        windowed_samples=windowed_samples,
+        frequencies=windowed_frequencies,
+        raw_magnitude_db=build_relative_db(raw_magnitudes),
+        windowed_magnitude_db=build_relative_db(windowed_magnitudes),
+        spectral_centroid=centroid,
+        effective_bandwidth=bandwidth,
+        band_energies=band_energies,
+        band_ratios=band_ratios,
+        spectral_flatness=calculate_spectral_flatness(windowed_power),
+        spectral_crest=calculate_spectral_crest(windowed_power),
+        cepstrum_quefrencies_ms=quefrencies * 1000.0,
+        cepstrum_values=cepstrum,
+        f0_cepstrum=calculate_cepstrum_f0(
+            segment,
+            audio_data.sample_rate,
+            min_frequency=cepstrum_min_frequency,
+            max_frequency=cepstrum_max_frequency,
+            window_name=window_name,
+            reference_frequency=cepstrum_reference_frequency,
+        ),
+    )
+
+
+def reduce_matrix_mean(matrix: np.ndarray, axis: int, target_size: int) -> np.ndarray:
+    current_size = matrix.shape[axis]
+    if current_size <= target_size or target_size <= 0:
+        return matrix
+
+    index_slices = np.array_split(np.arange(current_size), target_size)
+    reduced_parts = []
+
+    for group in index_slices:
+        if axis == 0:
+            reduced_parts.append(np.mean(matrix[group, :], axis=0))
+        else:
+            reduced_parts.append(np.mean(matrix[:, group], axis=1))
+
+    if axis == 0:
+        return np.vstack(reduced_parts)
+    return np.column_stack(reduced_parts)
+
+
+def reduce_axis_mean(values: np.ndarray, target_size: int) -> np.ndarray:
+    if len(values) <= target_size or target_size <= 0:
+        return values
+
+    index_slices = np.array_split(np.arange(len(values)), target_size)
+    reduced = []
+    for group in index_slices:
+        reduced.append(float(np.mean(values[group])))
+    return np.array(reduced, dtype=np.float64)
+
+
+def compute_spectrogram(
+    audio_data: AudioData,
+    frame_ms: float = 40.0,
+    overlap_percent: float = 50.0,
+    window_name: str = "hann",
+    max_frequency_hz: float | None = None,
+    max_time_bins: int = 1400,
+    max_frequency_bins: int = 256,
+) -> SpectrogramData:
+    if audio_data.sample_rate <= 0:
+        return SpectrogramData(
+            frame_ms=frame_ms,
+            overlap_percent=overlap_percent,
+            sample_rate=audio_data.sample_rate,
+            window_name=normalize_window_name(window_name),
+            times=np.zeros(0, dtype=np.float64),
+            frequencies=np.zeros(0, dtype=np.float64),
+            magnitude_db=np.zeros((0, 0), dtype=np.float64),
+        )
+
+    frame_size = max(16, int(audio_data.sample_rate * frame_ms / 1000.0))
+    overlap_samples = int(frame_size * max(0.0, min(overlap_percent, 95.0)) / 100.0)
+    hop_size = max(1, frame_size - overlap_samples)
+    window = create_window(window_name, frame_size)
+
+    if len(audio_data.samples) == 0:
+        frames = [np.zeros(frame_size, dtype=np.float64)]
+        start_indices = [0]
+    else:
+        frames = []
+        start_indices = []
+        start_index = 0
+
+        while start_index < len(audio_data.samples):
+            end_index = start_index + frame_size
+            frame = audio_data.samples[start_index:end_index]
+            if len(frame) < frame_size:
+                frame = np.pad(frame, (0, frame_size - len(frame)))
+
+            frames.append(frame.astype(np.float64))
+            start_indices.append(start_index)
+
+            if end_index >= len(audio_data.samples):
+                break
+            start_index += hop_size
+
+    spectra = []
+    times = []
+    for start_index, frame in zip(start_indices, frames):
+        windowed = frame * window
+        magnitudes = np.abs(np.fft.rfft(windowed))
+        spectra.append(magnitudes)
+        times.append((start_index + (frame_size / 2.0)) / audio_data.sample_rate)
+
+    magnitude = np.array(spectra, dtype=np.float64).T
+    frequencies = np.fft.rfftfreq(frame_size, d=1.0 / audio_data.sample_rate)
+
+    if max_frequency_hz is not None:
+        valid_mask = frequencies <= max_frequency_hz
+        magnitude = magnitude[valid_mask, :]
+        frequencies = frequencies[valid_mask]
+
+    magnitude_db = build_relative_db(magnitude.flatten()).reshape(magnitude.shape)
+
+    if magnitude_db.shape[1] > max_time_bins:
+        magnitude_db = reduce_matrix_mean(magnitude_db, axis=1, target_size=max_time_bins)
+        times = reduce_axis_mean(np.array(times, dtype=np.float64), max_time_bins)
+    else:
+        times = np.array(times, dtype=np.float64)
+
+    if magnitude_db.shape[0] > max_frequency_bins:
+        magnitude_db = reduce_matrix_mean(magnitude_db, axis=0, target_size=max_frequency_bins)
+        frequencies = reduce_axis_mean(frequencies, max_frequency_bins)
+
+    return SpectrogramData(
+        frame_ms=frame_ms,
+        overlap_percent=overlap_percent,
+        sample_rate=audio_data.sample_rate,
+        window_name=normalize_window_name(window_name),
+        times=times,
+        frequencies=frequencies,
+        magnitude_db=magnitude_db,
+    )
 
 
 def calculate_volume_undulation(volumes: list[float]) -> float:
@@ -565,6 +1151,33 @@ def merge_short_middle_non_silence_runs(labels: list[str], max_run_length: int) 
     return cleaned_labels
 
 
+def smooth_frequency_track(values: list[float], active_labels: list[str], active_label: str = "voiced", radius: int = 2) -> list[float]:
+    if not values:
+        return []
+
+    smoothed_values = list(values)
+    for index, value in enumerate(values):
+        if value <= 0.0 or active_labels[index] != active_label:
+            continue
+
+        neighborhood = []
+        for neighbor_index in range(max(0, index - radius), min(len(values), index + radius + 1)):
+            neighbor_value = values[neighbor_index]
+            if neighbor_value > 0.0 and active_labels[neighbor_index] == active_label:
+                neighborhood.append(neighbor_value)
+
+        if len(neighborhood) < 3:
+            continue
+
+        sorted_neighborhood = sorted(neighborhood)
+        median_value = sorted_neighborhood[len(sorted_neighborhood) // 2]
+        relative_difference = abs(value - median_value) / max(median_value, 1e-6)
+        if relative_difference > 0.35:
+            smoothed_values[index] = median_value
+
+    return smoothed_values
+
+
 def choose_overall_label(labels: list[str], clip_hzcrr: float = 0.0) -> str:
     speech_count = 0
     music_count = 0
@@ -616,21 +1229,68 @@ def analyze_audio(audio_data: AudioData, frame_ms: float = 20.0, hop_ms: float =
     f0_autocorrelation_values = []
     f0_amdf_values = []
     dominant_frequencies = []
+    spectral_centroids = []
+    effective_bandwidths = []
+    ersb1_values = []
+    ersb2_values = []
+    ersb3_values = []
+    spectral_flatness_values = []
+    spectral_crest_values = []
+    f0_cepstrum_values = []
+    cepstrum_window_seconds = max(0.04, frame_ms / 1000.0)
 
-    for frame in frames:
+    for frame_index, frame in enumerate(frames):
         volume = calculate_volume(frame)
         ste = calculate_ste(frame)
         zcr = calculate_zcr(frame)
         f0_autocorrelation = calculate_autocorrelation_f0(frame, analysis_sample_rate)
         f0_amdf = calculate_amdf_f0(frame, analysis_sample_rate)
-        dominant_frequency = calculate_dominant_frequency_fft(frame, analysis_sample_rate)
+        cepstrum_reference_candidates = []
+        if 70.0 <= f0_autocorrelation <= 350.0:
+            cepstrum_reference_candidates.append(f0_autocorrelation)
+        if 70.0 <= f0_amdf <= 350.0:
+            cepstrum_reference_candidates.append(f0_amdf)
+
+        cepstrum_reference_frequency = None
+        if cepstrum_reference_candidates:
+            cepstrum_reference_frequency = mean_value(cepstrum_reference_candidates)
+
+        frame_center_time = (start_times[frame_index] + end_times[frame_index]) * 0.5
+        cepstrum_frame = extract_centered_audio_segment(
+            analysis_samples,
+            analysis_sample_rate,
+            frame_center_time,
+            cepstrum_window_seconds,
+        )
+        frequency_features = calculate_frequency_features(
+            frame,
+            analysis_sample_rate,
+            cepstrum_reference_frequency=cepstrum_reference_frequency,
+            cepstrum_min_frequency=70.0,
+            cepstrum_max_frequency=350.0,
+        )
+        frequency_features["f0_cepstrum"] = calculate_cepstrum_f0(
+            cepstrum_frame,
+            analysis_sample_rate,
+            min_frequency=70.0,
+            max_frequency=350.0,
+            reference_frequency=cepstrum_reference_frequency,
+        )
 
         volumes.append(volume)
         ste_values.append(ste)
         zcr_values.append(zcr)
         f0_autocorrelation_values.append(f0_autocorrelation)
         f0_amdf_values.append(f0_amdf)
-        dominant_frequencies.append(dominant_frequency)
+        dominant_frequencies.append(frequency_features["dominant_frequency_fft"])
+        spectral_centroids.append(frequency_features["spectral_centroid"])
+        effective_bandwidths.append(frequency_features["effective_bandwidth"])
+        ersb1_values.append(frequency_features["ersb1"])
+        ersb2_values.append(frequency_features["ersb2"])
+        ersb3_values.append(frequency_features["ersb3"])
+        spectral_flatness_values.append(frequency_features["spectral_flatness"])
+        spectral_crest_values.append(frequency_features["spectral_crest"])
+        f0_cepstrum_values.append(frequency_features["f0_cepstrum"])
 
     max_volume = max(volumes) if volumes else 0.0
     normalized_volumes = []
@@ -666,7 +1326,8 @@ def analyze_audio(audio_data: AudioData, frame_ms: float = 20.0, hop_ms: float =
 
         valid_f0_autocorrelation = 70.0 <= f0_autocorrelation_values[index] <= 350.0
         valid_f0_amdf = 70.0 <= f0_amdf_values[index] <= 350.0
-        has_valid_f0 = valid_f0_autocorrelation or valid_f0_amdf
+        valid_f0_cepstrum = 70.0 <= f0_cepstrum_values[index] <= 350.0
+        has_valid_f0 = valid_f0_autocorrelation or valid_f0_amdf or valid_f0_cepstrum
         strong_low_zcr_condition = (
             normalized_volumes[index] > max(silence_volume_threshold * 3.0, 0.10)
             and zcr_values[index] < 0.05
@@ -690,16 +1351,22 @@ def analyze_audio(audio_data: AudioData, frame_ms: float = 20.0, hop_ms: float =
     for index in range(len(frames)):
         valid_f0_autocorrelation = 70.0 <= f0_autocorrelation_values[index] <= 350.0
         valid_f0_amdf = 70.0 <= f0_amdf_values[index] <= 350.0
+        valid_f0_cepstrum = 70.0 <= f0_cepstrum_values[index] <= 350.0
 
         if voicing_labels[index] != "voiced":
             f0_autocorrelation_values[index] = 0.0
             f0_amdf_values[index] = 0.0
+            f0_cepstrum_values[index] = 0.0
             continue
 
         if not valid_f0_autocorrelation:
             f0_autocorrelation_values[index] = 0.0
         if not valid_f0_amdf:
             f0_amdf_values[index] = 0.0
+        if not valid_f0_cepstrum:
+            f0_cepstrum_values[index] = 0.0
+
+    f0_cepstrum_values = smooth_frequency_track(f0_cepstrum_values, voicing_labels, active_label="voiced", radius=2)
 
     frame_rate = 1
     if hop_size > 0:
@@ -759,6 +1426,7 @@ def analyze_audio(audio_data: AudioData, frame_ms: float = 20.0, hop_ms: float =
             and zcr_values[index] < max(0.06, mean_zcr * 0.85)
             and local_hzcrr_ratios[index] < 0.18
             and local_volume_means[index] > max(silence_volume_threshold * 1.4, 0.05)
+            and spectral_flatness_values[index] < 0.50
         )
 
         speech_condition = (
@@ -772,6 +1440,7 @@ def analyze_audio(audio_data: AudioData, frame_ms: float = 20.0, hop_ms: float =
                 and local_voiced_ratios[index] < 0.45
             )
             or (local_lster_ratios[index] > 0.40 and local_voiced_ratios[index] < 0.45)
+            or spectral_flatness_values[index] > 0.65
         )
 
         music_condition = (
@@ -783,6 +1452,7 @@ def analyze_audio(audio_data: AudioData, frame_ms: float = 20.0, hop_ms: float =
                 and local_vstd < 0.18
                 and local_hzcrr_ratios[index] < 0.20
                 and local_volume_means[index] > max(silence_volume_threshold * 1.2, 0.05)
+                and spectral_flatness_values[index] < 0.55
             )
         )
 
@@ -817,6 +1487,14 @@ def analyze_audio(audio_data: AudioData, frame_ms: float = 20.0, hop_ms: float =
                 f0_autocorrelation=f0_autocorrelation_values[index],
                 f0_amdf=f0_amdf_values[index],
                 dominant_frequency_fft=dominant_frequencies[index],
+                spectral_centroid=spectral_centroids[index],
+                effective_bandwidth=effective_bandwidths[index],
+                ersb1=ersb1_values[index],
+                ersb2=ersb2_values[index],
+                ersb3=ersb3_values[index],
+                spectral_flatness=spectral_flatness_values[index],
+                spectral_crest=spectral_crest_values[index],
+                f0_cepstrum=f0_cepstrum_values[index],
                 voicing_label=voicing_labels[index],
                 speech_music_label=speech_music_labels[index],
             )
@@ -846,6 +1524,25 @@ def analyze_audio(audio_data: AudioData, frame_ms: float = 20.0, hop_ms: float =
     non_zero_f0_autocorrelation = [value for value in f0_autocorrelation_values if value > 0.0]
     non_zero_f0_amdf = [value for value in f0_amdf_values if value > 0.0]
     non_zero_fft_frequencies = [value for value in dominant_frequencies if value > 0.0]
+    non_zero_f0_cepstrum = [value for value in f0_cepstrum_values if value > 0.0]
+    non_silent_indices = [index for index, flag in enumerate(silent_flags) if flag == 0]
+
+    if non_silent_indices:
+        clip_spectral_centroid = mean_value([spectral_centroids[index] for index in non_silent_indices])
+        clip_effective_bandwidth = mean_value([effective_bandwidths[index] for index in non_silent_indices])
+        clip_ersb1 = mean_value([ersb1_values[index] for index in non_silent_indices])
+        clip_ersb2 = mean_value([ersb2_values[index] for index in non_silent_indices])
+        clip_ersb3 = mean_value([ersb3_values[index] for index in non_silent_indices])
+        clip_spectral_flatness = mean_value([spectral_flatness_values[index] for index in non_silent_indices])
+        clip_spectral_crest = mean_value([spectral_crest_values[index] for index in non_silent_indices])
+    else:
+        clip_spectral_centroid = 0.0
+        clip_effective_bandwidth = 0.0
+        clip_ersb1 = 0.0
+        clip_ersb2 = 0.0
+        clip_ersb3 = 0.0
+        clip_spectral_flatness = 0.0
+        clip_spectral_crest = 0.0
 
     clip_features = ClipFeatures(
         mean_volume=clip_mean_volume,
@@ -860,6 +1557,14 @@ def analyze_audio(audio_data: AudioData, frame_ms: float = 20.0, hop_ms: float =
         mean_f0_autocorrelation=mean_value(non_zero_f0_autocorrelation),
         mean_f0_amdf=mean_value(non_zero_f0_amdf),
         mean_dominant_frequency_fft=mean_value(non_zero_fft_frequencies),
+        mean_spectral_centroid=clip_spectral_centroid,
+        mean_effective_bandwidth=clip_effective_bandwidth,
+        mean_ersb1=clip_ersb1,
+        mean_ersb2=clip_ersb2,
+        mean_ersb3=clip_ersb3,
+        mean_spectral_flatness=clip_spectral_flatness,
+        mean_spectral_crest=clip_spectral_crest,
+        mean_f0_cepstrum=mean_value(non_zero_f0_cepstrum),
         overall_label=choose_overall_label(speech_music_labels, clip_hzcrr),
     )
 
@@ -887,6 +1592,82 @@ def analyze_audio(audio_data: AudioData, frame_ms: float = 20.0, hop_ms: float =
     )
 
 
+def build_summary_lines(result: AnalysisResult) -> list[str]:
+    lines = []
+    audio = result.audio_data
+    clip = result.clip
+    frames = result.frames
+
+    voiced_frames = sum(1 for frame in frames if frame.voicing_label == "voiced")
+    unvoiced_frames = sum(1 for frame in frames if frame.voicing_label == "unvoiced")
+    silent_frames = sum(1 for frame in frames if frame.voicing_label == "silence")
+    speech_frames = sum(1 for frame in frames if frame.speech_music_label == "speech")
+    music_frames = sum(1 for frame in frames if frame.speech_music_label == "music")
+
+    lines.extend(
+        [
+            "Podsumowanie klipu",
+            "",
+            f"Plik: {audio.path}",
+            f"Czestotliwosc probkowania: {audio.sample_rate} Hz",
+            f"Czestotliwosc analizy: {result.analysis_sample_rate} Hz",
+            f"Downsample factor: {result.downsample_factor}",
+            f"Liczba kanalow: {audio.channels}",
+            f"Dlugosc: {audio.duration_seconds:.3f} s",
+            f"Frame/Hop: {result.frame_ms:.2f} ms / {result.hop_ms:.2f} ms",
+            f"Liczba ramek: {len(frames)}",
+            "",
+            "Progi ciszy:",
+            f"- volume_norm < {result.silence_volume_threshold:.4f}",
+            f"- zcr < {result.silence_zcr_threshold:.4f}",
+            "",
+            "Cechy clip-level w dziedzinie czasu:",
+            f"- Mean Volume: {clip.mean_volume:.6f}",
+            f"- VSTD: {clip.vstd:.6f}",
+            f"- VDR: {clip.vdr:.6f}",
+            f"- VU: {clip.vu:.6f}",
+            f"- LSTER: {clip.lster:.6f}",
+            f"- Energy Entropy: {clip.energy_entropy:.6f}",
+            f"- ZSTD: {clip.zstd:.6f}",
+            f"- HZCRR: {clip.hzcrr:.6f}",
+            f"- Silent Ratio: {clip.silent_ratio:.6f}",
+            "",
+            "Cechy clip-level w dziedzinie czestotliwosci:",
+            f"- Mean F0 (autokorelacja): {clip.mean_f0_autocorrelation:.3f} Hz",
+            f"- Mean F0 (AMDF): {clip.mean_f0_amdf:.3f} Hz",
+            f"- Mean F0 (cepstrum): {clip.mean_f0_cepstrum:.3f} Hz",
+            f"- Mean dominant FFT frequency: {clip.mean_dominant_frequency_fft:.3f} Hz",
+            f"- Mean spectral centroid: {clip.mean_spectral_centroid:.3f} Hz",
+            f"- Mean effective bandwidth: {clip.mean_effective_bandwidth:.3f} Hz",
+            f"- Mean ERSB1: {clip.mean_ersb1:.6f}",
+            f"- Mean ERSB2: {clip.mean_ersb2:.6f}",
+            f"- Mean ERSB3: {clip.mean_ersb3:.6f}",
+            f"- Mean spectral flatness: {clip.mean_spectral_flatness:.6f}",
+            f"- Mean spectral crest: {clip.mean_spectral_crest:.6f}",
+            f"- Etykieta ogolna: {clip.overall_label}",
+            "",
+            "Liczba ramek wg etykiet:",
+            f"- voiced: {voiced_frames}",
+            f"- unvoiced: {unvoiced_frames}",
+            f"- silence: {silent_frames}",
+            f"- speech: {speech_frames}",
+            f"- music: {music_frames}",
+            "",
+            "Segmenty voiced/unvoiced:",
+        ]
+    )
+
+    for start_time, end_time, label in result.voicing_segments:
+        lines.append(f"- {start_time:.3f}s - {end_time:.3f}s: {label}")
+
+    lines.append("")
+    lines.append("Segmenty speech/music:")
+    for start_time, end_time, label in result.speech_music_segments:
+        lines.append(f"- {start_time:.3f}s - {end_time:.3f}s: {label}")
+
+    return lines
+
+
 def export_frames_to_csv(result: AnalysisResult, path: str) -> None:
     with open(path, "w", newline="", encoding="utf-8") as output_file:
         writer = csv.writer(output_file)
@@ -903,6 +1684,14 @@ def export_frames_to_csv(result: AnalysisResult, path: str) -> None:
                 "f0_autocorrelation_hz",
                 "f0_amdf_hz",
                 "dominant_frequency_fft_hz",
+                "spectral_centroid_hz",
+                "effective_bandwidth_hz",
+                "ersb1",
+                "ersb2",
+                "ersb3",
+                "spectral_flatness",
+                "spectral_crest",
+                "f0_cepstrum_hz",
                 "voicing_label",
                 "speech_music_label",
             ]
@@ -922,6 +1711,14 @@ def export_frames_to_csv(result: AnalysisResult, path: str) -> None:
                     f"{frame.f0_autocorrelation:.6f}",
                     f"{frame.f0_amdf:.6f}",
                     f"{frame.dominant_frequency_fft:.6f}",
+                    f"{frame.spectral_centroid:.6f}",
+                    f"{frame.effective_bandwidth:.6f}",
+                    f"{frame.ersb1:.6f}",
+                    f"{frame.ersb2:.6f}",
+                    f"{frame.ersb3:.6f}",
+                    f"{frame.spectral_flatness:.6f}",
+                    f"{frame.spectral_crest:.6f}",
+                    f"{frame.f0_cepstrum:.6f}",
                     frame.voicing_label,
                     frame.speech_music_label,
                 ]
@@ -929,48 +1726,5 @@ def export_frames_to_csv(result: AnalysisResult, path: str) -> None:
 
 
 def export_summary_to_txt(result: AnalysisResult, path: str) -> None:
-    lines = []
-    audio = result.audio_data
-    clip = result.clip
-
-    lines.append("Analiza sygnalu audio w dziedzinie czasu")
-    lines.append("")
-    lines.append(f"Plik: {audio.path}")
-    lines.append(f"Czestotliwosc probkowania: {audio.sample_rate} Hz")
-    lines.append(f"Czestotliwosc analizy: {result.analysis_sample_rate} Hz")
-    lines.append(f"Downsample factor: {result.downsample_factor}")
-    lines.append(f"Liczba kanalow: {audio.channels}")
-    lines.append(f"Dlugosc sygnalu: {audio.duration_seconds:.3f} s")
-    lines.append(f"Frame size: {result.frame_ms:.2f} ms ({result.frame_size_samples} probek)")
-    lines.append(f"Hop size: {result.hop_ms:.2f} ms ({result.hop_size_samples} probek)")
-    lines.append(f"Liczba ramek: {len(result.frames)}")
-    lines.append("")
-    lines.append("Progi heurystyczne:")
-    lines.append(f"- prog ciszy dla volume: {result.silence_volume_threshold:.4f}")
-    lines.append(f"- prog ciszy dla ZCR: {result.silence_zcr_threshold:.4f}")
-    lines.append("")
-    lines.append("Cechy clip-level:")
-    lines.append(f"- Mean Volume: {clip.mean_volume:.6f}")
-    lines.append(f"- VSTD: {clip.vstd:.6f}")
-    lines.append(f"- VDR: {clip.vdr:.6f}")
-    lines.append(f"- VU: {clip.vu:.6f}")
-    lines.append(f"- LSTER: {clip.lster:.6f}")
-    lines.append(f"- Energy Entropy: {clip.energy_entropy:.6f}")
-    lines.append(f"- ZSTD: {clip.zstd:.6f}")
-    lines.append(f"- HZCRR: {clip.hzcrr:.6f}")
-    lines.append(f"- Silent Ratio: {clip.silent_ratio:.6f}")
-    lines.append(f"- Mean F0 (autokorelacja): {clip.mean_f0_autocorrelation:.3f} Hz")
-    lines.append(f"- Mean F0 (AMDF): {clip.mean_f0_amdf:.3f} Hz")
-    lines.append(f"- Mean dominant frequency FFT: {clip.mean_dominant_frequency_fft:.3f} Hz")
-    lines.append(f"- Ogolna etykieta klipu: {clip.overall_label}")
-    lines.append("")
-    lines.append("Segmenty voiced/unvoiced:")
-    for start_time, end_time, label in result.voicing_segments:
-        lines.append(f"- {start_time:.3f}s - {end_time:.3f}s: {label}")
-    lines.append("")
-    lines.append("Segmenty speech/music:")
-    for start_time, end_time, label in result.speech_music_segments:
-        lines.append(f"- {start_time:.3f}s - {end_time:.3f}s: {label}")
-
     with open(path, "w", encoding="utf-8") as output_file:
-        output_file.write("\n".join(lines))
+        output_file.write("\n".join(build_summary_lines(result)))
