@@ -1448,7 +1448,7 @@ class MainWindow(QMainWindow):
             self.cepstrum_f0_plot.clear_plot()
 
     def open_wav_file(self) -> None:
-        file_path, _ = QFileDialog.getOpenFileName(self, "Wybierz plik WAV", "", "Pliki WAV")
+        file_path, _ = QFileDialog.getOpenFileName(self, "Wybierz plik WAV", "", "Pliki WAV (*.wav);;All Files (*)")
         if not file_path:
             return
 
